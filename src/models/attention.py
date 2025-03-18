@@ -1,7 +1,4 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
+from ..utils.imports import torch, nn, F, math
 
 class MultiHeadAttention(nn.Module):
     """
@@ -138,3 +135,31 @@ class PositionWiseFeedForward(nn.Module):
         x = self.linear2(x)
         
         return x
+    
+    
+    
+    
+    
+    
+    # RUNNING TEST
+def test_multi_head_attention():
+    batch_size, seq_len, embed_dim = 2, 10, 512
+    num_heads = 8
+    
+    # Create random input tensors
+    query = torch.rand(batch_size, seq_len, embed_dim)
+    key = torch.rand(batch_size, seq_len, embed_dim)
+    value = torch.rand(batch_size, seq_len, embed_dim)
+    
+    # Initialize attention module
+    attention = MultiHeadAttention(embed_dim, num_heads)
+    
+    # Forward pass
+    output, weights = attention(query, key, value)
+    
+    # Check output shape
+    assert output.shape == (batch_size, seq_len, embed_dim)
+    # Check attention weights shape
+    assert weights.shape == (batch_size, num_heads, seq_len, seq_len)
+    # Check weights sum to 1 along the correct dimension
+    assert torch.allclose(weights.sum(dim=-1), torch.ones(batch_size, num_heads, seq_len))
