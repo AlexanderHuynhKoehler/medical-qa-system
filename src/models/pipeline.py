@@ -1,6 +1,5 @@
-from transformers import BertTokenizer
+from src.utils import *
 import torch
-from base_model import MedicalQAModel
 
 
 class MedicalQAPipeline:

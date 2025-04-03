@@ -1,14 +1,5 @@
-from ..utils.imports import *
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from src.utils import *
 import math
-import copy
-from transformers import BertConfig, BertTokenizer
-from transformers.models.bert.modeling_bert import BertEmbeddings
-
-# Import the MultiHeadAttention and PositionWiseFeedForward from your attention.py
-from attention import MultiHeadAttention, PositionWiseFeedForward
 
 class LayerNorm(nn.Module):
     """
@@ -100,83 +91,91 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class EncoderLayer(nn.Module):
-    """
-    Single Transformer Encoder Layer.
-    
-    Consists of multi-head self-attention followed by position-wise feed-forward,
-    with layer normalization and residual connections.
-    """
-    def __init__(self, embed_dim, num_heads, ff_dim, dropout=0.1):
-        super(EncoderLayer, self).__init__()
-        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout)
-        self.feed_forward = PositionWiseFeedForward(embed_dim, ff_dim, dropout)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.dropout = nn.Dropout(dropout)
-    
-    def forward(self, x, mask=None):
-        attn_output, _ = self.self_attn(x, x, x, mask)
+    """Simplified Transformer Encoder Layer using built-in implementations"""
+    def __init__(self, config):
+        super().__init__()
+        self.attention = MultiHeadAttention(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            dropout=config.attention_probs_dropout_prob
+        )
+        # Replace custom FFN with PyTorch's implementation
+        self.feed_forward = nn.Sequential(
+            nn.Linear(config.hidden_size, config.intermediate_size),
+            nn.GELU(),
+            nn.Linear(config.intermediate_size, config.hidden_size)
+        )
+        self.norm1 = nn.LayerNorm(config.hidden_size)
+        self.norm2 = nn.LayerNorm(config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, x, attention_mask=None):
+        # Update parameter name to match attention.py
+        attn_output, _ = self.attention(x, x, x, attention_mask=attention_mask)
         x = self.norm1(x + self.dropout(attn_output))
         ff_output = self.feed_forward(x)
         x = self.norm2(x + self.dropout(ff_output))
         return x
 
 class CustomTransformerEncoder(nn.Module):
-    def __init__(self, config, num_layers=6):
+    def __init__(self, config):
         super().__init__()
-        self.embeddings = BertEmbeddings(config)  # Use BERT's embedding layer
-        self.layers = nn.ModuleList([
-            EncoderLayer(
-                embed_dim=config.hidden_size,
-                num_heads=config.num_attention_heads,
-                ff_dim=config.intermediate_size,
-                dropout=config.hidden_dropout_prob
-            ) for _ in range(num_layers)
-        ])
+        self.bert = BertModel.from_pretrained(config.model_name)
+        encoder_layer = TransformerEncoderLayer(
+            d_model=config.hidden_size,
+            nhead=config.num_attention_heads,
+            dim_feedforward=config.intermediate_size,
+            dropout=config.attention_probs_dropout_prob,
+            batch_first=True
+        )
+        self.layers = nn.ModuleList([encoder_layer for _ in range(config.num_hidden_layers)])
         self.norm = nn.LayerNorm(config.hidden_size)
 
     def forward(self, input_ids, attention_mask=None):
-        x = self.embeddings(input_ids)
+        # Use BERT's embedding layer
+        embeddings = self.bert.embeddings(input_ids)
+        x = embeddings
+        
         for layer in self.layers:
             x = layer(x, attention_mask)
         return self.norm(x)
 
 class MedicalQAModel(nn.Module):
-    def __init__(self, pretrained_model_name='bert-base-uncased', dropout=0.1):
+    def __init__(self, model_name='bert-base-uncased', dropout=0.1):
         super().__init__()
-        config = BertConfig.from_pretrained(pretrained_model_name)
+        config = BertConfig.from_pretrained(model_name)
+        config.model_name = model_name
+        
         self.encoder = CustomTransformerEncoder(config)
         self.embed_dim = config.hidden_size
-        self.yes_no_head = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.embed_dim // 2, 2)
-        )
-        self.span_start_head = nn.Linear(self.embed_dim, 1)
-        self.span_end_head = nn.Linear(self.embed_dim, 1)
-        self.yes_no_confidence = nn.Linear(self.embed_dim, 1)
-        self.span_confidence = nn.Linear(self.embed_dim * 2, 1)
+        
+        # Simplified classification heads
+        self.yes_no_head = nn.Linear(self.embed_dim, 2)
+        self.span_head = nn.Linear(self.embed_dim, 2)  # Start/end positions
+        self.confidence_head = nn.Linear(self.embed_dim, 2)  # Yes-no/span confidence
     
     def forward(self, input_ids, attention_mask=None):
         encoded = self.encoder(input_ids, attention_mask)
         cls_representation = encoded[:, 0, :]
         yes_no_logits = self.yes_no_head(cls_representation)
-        span_start_logits = self.span_start_head(encoded).squeeze(-1)
-        span_end_logits = self.span_end_head(encoded).squeeze(-1)
-        yes_no_conf = self.yes_no_confidence(cls_representation).sigmoid()
-        batch_size, seq_len, _ = encoded.shape
-        start_idx = torch.argmax(span_start_logits, dim=1)
-        end_idx = torch.argmax(span_end_logits, dim=1)
-        batch_indices = torch.arange(batch_size, device=input_ids.device)
-        start_vecs = encoded[batch_indices, start_idx]
-        end_vecs = encoded[batch_indices, end_idx]
+        span_logits = self.span_head(encoded)
+        yes_no_conf = self.confidence_head(cls_representation).sigmoid()
+        
+        # Use torch.max to get the indices and values directly
+        start_idx = torch.argmax(span_logits[:, :, 0], dim=1)
+        end_idx = torch.argmax(span_logits[:, :, 1], dim=1)
+        
+        # Gather the start and end vectors using the indices
+        start_vecs = torch.gather(encoded, 1, start_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
+        end_vecs = torch.gather(encoded, 1, end_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
+        
         span_conf_input = torch.cat([start_vecs, end_vecs], dim=-1)
-        span_conf = self.span_confidence(span_conf_input).sigmoid()
+        span_conf = self.confidence_head(span_conf_input).sigmoid()
+        
         return {
             'yes_no_logits': yes_no_logits,
-            'span_start_logits': span_start_logits,
-            'span_end_logits': span_end_logits,
+            'span_start_logits': span_logits[:, :, 0],
+            'span_end_logits': span_logits[:, :, 1],
             'yes_no_confidence': yes_no_conf,
             'span_confidence': span_conf
         }

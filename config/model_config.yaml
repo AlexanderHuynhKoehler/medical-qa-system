@@ -1,0 +1,8 @@
+model:
+  name: biobert-qa
+  pretrained_model: dmis-lab/biobert-base-cased-v1.1
+  max_seq_length: 512
+  hidden_size: 768
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  intermediate_size: 3072

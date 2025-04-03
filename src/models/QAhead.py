@@ -1,8 +1,5 @@
-import torch
 import torch.nn as nn
-from transformers import AutoModelForQuestionAnswering
-from transformers.modeling_outputs import QuestionAnsweringModelOutput
-from typing import Optional, Tuple
+from src.utils import *
 
 class QAHead(nn.Module):
     def __init__(self, hidden_size: int):
