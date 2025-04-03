@@ -154,31 +154,84 @@ class MedicalQAModel(nn.Module):
         self.span_head = nn.Linear(self.embed_dim, 2)  # Start/end positions
         self.confidence_head = nn.Linear(self.embed_dim, 2)  # Yes-no/span confidence
     
-    def forward(self, input_ids, attention_mask=None):
-        encoded = self.encoder(input_ids, attention_mask)
-        cls_representation = encoded[:, 0, :]
-        yes_no_logits = self.yes_no_head(cls_representation)
-        span_logits = self.span_head(encoded)
-        yes_no_conf = self.confidence_head(cls_representation).sigmoid()
+def forward(self, input_ids, attention_mask=None, start_positions=None, 
+            end_positions=None, yes_no_labels=None):
+    """
+    Forward pass with optional loss calculation when labels are provided.
+    
+    Args:
+        input_ids: Input token IDs
+        attention_mask: Attention mask for padding
+        start_positions: Optional ground truth start positions for loss calculation
+        end_positions: Optional ground truth end positions for loss calculation
+        yes_no_labels: Optional ground truth yes/no labels (1=yes, 0=no, -1=not yes/no question)
+    
+    Returns:
+        Dictionary containing model outputs and loss (if labels provided)
+    """
+    # Get encoder representations
+    encoded = self.encoder(input_ids, attention_mask)
+    cls_representation = encoded[:, 0, :]
+    
+    # Get yes/no logits
+    yes_no_logits = self.yes_no_head(cls_representation)
+    
+    # Get span prediction logits
+    span_logits = self.span_head(encoded)
+    span_start_logits = span_logits[:, :, 0]
+    span_end_logits = span_logits[:, :, 1]
+    
+    # Calculate confidence scores
+    yes_no_confidence = self.confidence_head(cls_representation).sigmoid()
+    
+    # Get predicted span indices
+    start_idx = torch.argmax(span_start_logits, dim=1)
+    end_idx = torch.argmax(span_end_logits, dim=1)
+    
+    # Extract span representations for confidence calculation
+    batch_size = encoded.size(0)
+    start_vecs = torch.gather(encoded, 1, 
+                              start_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
+    end_vecs = torch.gather(encoded, 1, 
+                            end_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
+    span_conf_input = torch.cat([start_vecs, end_vecs], dim=-1)
+    span_confidence = self.confidence_head(span_conf_input).sigmoid()
+    
+    # Prepare outputs dictionary
+    outputs = {
+        'yes_no_logits': yes_no_logits,
+        'span_start_logits': span_start_logits,
+        'span_end_logits': span_end_logits,
+        'yes_no_confidence': yes_no_confidence,
+        'span_confidence': span_confidence
+    }
+    
+    # Calculate loss if labels are provided (training mode)
+    if start_positions is not None and end_positions is not None and yes_no_labels is not None:
+        # Loss for yes/no classification
+        yes_no_loss = 0
+        # Only calculate yes/no loss for actual yes/no questions
+        yes_no_mask = (yes_no_labels != -1)
+        if yes_no_mask.sum() > 0:
+            # Filter yes/no questions
+            filtered_yes_no_logits = yes_no_logits[yes_no_mask]
+            filtered_yes_no_labels = yes_no_labels[yes_no_mask]
+            yes_no_loss = F.cross_entropy(filtered_yes_no_logits, filtered_yes_no_labels)
         
-        # Use torch.max to get the indices and values directly
-        start_idx = torch.argmax(span_logits[:, :, 0], dim=1)
-        end_idx = torch.argmax(span_logits[:, :, 1], dim=1)
+        # Loss for span extraction
+        # We use regular cross-entropy with ignore_index=-1
+        start_loss = F.cross_entropy(span_start_logits, start_positions, ignore_index=-1)
+        end_loss = F.cross_entropy(span_end_logits, end_positions, ignore_index=-1)
+        span_loss = (start_loss + end_loss) / 2
         
-        # Gather the start and end vectors using the indices
-        start_vecs = torch.gather(encoded, 1, start_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
-        end_vecs = torch.gather(encoded, 1, end_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, encoded.size(-1))).squeeze(1)
+        # Combine losses
+        # You can adjust these weights if needed
+        total_loss = yes_no_loss + span_loss
         
-        span_conf_input = torch.cat([start_vecs, end_vecs], dim=-1)
-        span_conf = self.confidence_head(span_conf_input).sigmoid()
-        
-        return {
-            'yes_no_logits': yes_no_logits,
-            'span_start_logits': span_logits[:, :, 0],
-            'span_end_logits': span_logits[:, :, 1],
-            'yes_no_confidence': yes_no_conf,
-            'span_confidence': span_conf
-        }
+        # Add loss to outputs
+        outputs['loss'] = total_loss
+    
+    return outputs
     
     def get_answer(self, text_tokens, yes_no_threshold=0.5):
         outputs = self.forward(text_tokens)
